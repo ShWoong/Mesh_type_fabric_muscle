@@ -25,12 +25,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "ma100bf103a.h"
+#include "pidcontroller.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 #define CHANNELS 9
 #define THERMISTOR_SAMPLES 10
+#define PWM_TIMERS 3
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -54,6 +56,7 @@ TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim8;
 
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
 volatile bool isMainFlag = false;
@@ -61,6 +64,25 @@ volatile bool isAdcFlag = false;
 
 static uint16_t adcBuf[CHANNELS * THERMISTOR_SAMPLES];
 volatile uint16_t adcMAF[CHANNELS];
+
+typedef struct{
+	uint16_t rawCh[CHANNELS];
+	float tempCh[CHANNELS];
+	float targetTemp[CHANNELS];
+}Temperature;
+Temperature temp;
+
+PID_t pid;
+typedef struct{
+	float kp, ki, kd;
+	float dutymin, dutymax;
+	float duty[CHANNELS];
+	uint16_t tim1Period, tim3Period, tim4Period;
+	uint16_t pulse[CHANNELS];
+}controller;
+controller ctrl;
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -79,6 +101,7 @@ int _write(int file, char* p, int len){
     HAL_UART_Transmit(&huart2, (uint8_t*)p, len, 1);
     return len;
 }
+static float GetDeltaTime(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -93,7 +116,11 @@ int _write(int file, char* p, int len){
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  ctrl.kp = 0.0f;
+  ctrl.ki = 0.0f;
+  ctrl.kd = 0.0f;
+  ctrl.dutymin = 0.0f;
+  ctrl.dutymax = 100.0f;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -126,6 +153,10 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim2);
   HAL_TIM_Base_Start(&htim8);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adcBuf, CHANNELS * THERMISTOR_SAMPLES);
+  PID_Init(ctrl.kp, ctrl.ki, ctrl.kd, ctrl.dutymin, ctrl.dutymax);
+  ctrl.tim1Period = __HAL_TIM_GET_AUTORELOAD(&htim1) + 1;
+  ctrl.tim3Period = __HAL_TIM_GET_AUTORELOAD(&htim3) + 1;
+  ctrl.tim4Period = __HAL_TIM_GET_AUTORELOAD(&htim4) + 1;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -136,10 +167,38 @@ int main(void)
 		  isMainFlag = false;
 		  isAdcFlag = false;
 
-		  uint16_t rawCh1 = adcMAF[1];
-		  float tempCh1 = thermistor_celsius(rawCh1);
-		  printf("%.2f\r\n", tempCh1);
-		  //printf("1\r\n");
+		  float dt = getDeltaTime();
+
+		  for(int i = 0; i < CHANNELS; i++)
+		  {
+			  temp.rawCh[i] = adcMAF[i];
+			  temp.tempCh[i] = thermistor_celsius(temp.rawCh[i]);
+
+			  ctrl.duty[i] = PID_Update(temp.targetTemp[i], temp.tempCh[i], dt);
+			  if(i < 4)
+			  {
+				  ctrl.pulse[i] = tim3Period*(duty[i]/ctrl.dutymax);
+			  }
+			  else if(i = 4)
+			  {
+				  ctrl.pulse[i] = tim4Period*(duty[i]/ctrl.dutymax);
+			  }
+			  else if(i > 4)
+			  {
+				  ctrl.pulse[i] = tim1Period*(duty[i]/ctrl.dutymax);
+			  }
+		  }
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse[0]);
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pulse[1]);
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, pulse[2]);
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, pulse[3]);
+		  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, pulse[4]);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse[5]);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pulse[6]);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pulse[7]);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, pulse[8]);
+
+		  printf("%.2f\r\n", temp.tempCh[0]);
 	  }
     /* USER CODE END WHILE */
 
@@ -675,8 +734,12 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
@@ -740,6 +803,43 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
         }
         isAdcFlag = true;
     }
+}
+
+void ProcessData(uint8_t* data, uint16_t len, UART_HandleTypeDef *huart)
+{
+    if(huart->Instance == USART2)
+    {
+        char cmd[128] = {0};
+        uint16_t copy_len = (len < 127 ? len : 127);
+        memcpy(cmd, data, copy_len);
+        cmd[copy_len] = '\0';
+
+        if (strchr(cmd, ',') != NULL)
+        {
+            float input_p = 0.0f, input_i = 0.0f, input_d = 0.0f;
+            if(sscanf(cmd, "%f,%f,%f", &input_p, &input_i, &input_d) == 3)
+            {
+            	pid.kp = input_p;
+            	pid.ki = input_i;
+            	pid.kd = input_d;
+            	printf("PID Gains Updated: P: %.2f, I: %.2f, D: %.2f\r\n", pid.kp, pid.ki, pid.kd);
+            }
+        }
+    }
+}
+
+static float GetDeltaTime(void)
+{
+    uint32_t now = __HAL_TIM_GET_COUNTER(&htim8);
+    uint32_t diff;
+    if (now >= lastCnt8) {
+        diff = now - lastCnt8;
+    } else {
+        /* 오버플로우 처리: CNT 최대는 ARR=9999 */
+        diff = (9999 - lastCnt8) + now + 1;
+    }
+    lastCnt8 = now;
+    return diff * 0.0000001f;  /* 0.1µs × diff = sec */
 }
 /* USER CODE END 4 */
 

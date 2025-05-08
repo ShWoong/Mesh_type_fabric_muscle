@@ -46,7 +46,8 @@
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-
+void UART_IdleProcess(UART_HandleTypeDef *huart, uint8_t *rx_buffer, uint16_t buffer_size);
+void ProcessData(uint8_t* data, uint16_t len, UART_HandleTypeDef *huart);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -58,6 +59,8 @@
 extern DMA_HandleTypeDef hdma_adc1;
 extern ADC_HandleTypeDef hadc1;
 extern TIM_HandleTypeDef htim2;
+extern DMA_HandleTypeDef hdma_usart2_rx;
+extern UART_HandleTypeDef huart2;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -201,6 +204,20 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles DMA1 stream5 global interrupt.
+  */
+void DMA1_Stream5_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Stream5_IRQn 0 */
+
+  /* USER CODE END DMA1_Stream5_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_usart2_rx);
+  /* USER CODE BEGIN DMA1_Stream5_IRQn 1 */
+
+  /* USER CODE END DMA1_Stream5_IRQn 1 */
+}
+
+/**
   * @brief This function handles ADC1, ADC2 and ADC3 interrupts.
   */
 void ADC_IRQHandler(void)
@@ -229,6 +246,20 @@ void TIM2_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles USART2 global interrupt.
+  */
+void USART2_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART2_IRQn 0 */
+
+  /* USER CODE END USART2_IRQn 0 */
+  HAL_UART_IRQHandler(&huart2);
+  /* USER CODE BEGIN USART2_IRQn 1 */
+  UART_IdleProcess(&huart2, usart2_rx_buffer, USART2_RX_BUFFER_SIZE);
+  /* USER CODE END USART2_IRQn 1 */
+}
+
+/**
   * @brief This function handles DMA2 stream0 global interrupt.
   */
 void DMA2_Stream0_IRQHandler(void)
@@ -243,5 +274,18 @@ void DMA2_Stream0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+void UART_IdleProcess(UART_HandleTypeDef *huart, uint8_t *rx_buffer, uint16_t buffer_size)
+{
+    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE))
+    {
+        __HAL_UART_CLEAR_IDLEFLAG(huart);
+        HAL_UART_DMAStop(huart);
+        uint16_t rx_length = buffer_size - __HAL_DMA_GET_COUNTER(huart->hdmarx);
+        if (rx_length > 0)
+        {
+            ProcessData(rx_buffer, rx_length, huart);
+        }
+        HAL_UART_Receive_DMA(huart, rx_buffer, buffer_size);
+    }
+}
 /* USER CODE END 1 */
