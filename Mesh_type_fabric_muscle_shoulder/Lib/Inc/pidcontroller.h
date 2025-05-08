@@ -1,8 +1,11 @@
 #ifndef PIDCONTROLLER_H
 #define PIDCONTROLLER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
-#include <math.h>
 
 typedef struct {
     float kp, ki, kd;
@@ -11,7 +14,6 @@ typedef struct {
     float prev_error;
 } PID_t;
 
-extern PID_t pid;
 
 void  PID_Init(PID_t *pid,
                float kp, float ki, float kd,
@@ -21,5 +23,9 @@ float PID_Update(PID_t *pid,
                  float setpoint,
                  float measurement,
                  float dt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* PIDCONTROLLER_H */

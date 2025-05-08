@@ -1,6 +1,5 @@
 #include "pidcontroller.h"
-
-PID_t pid;
+#include <math.h>
 
 /**********Initializing**********/
 void PID_Init(PID_t *pid, float kp, float ki, float kd, float out_min, float out_max)
@@ -24,24 +23,28 @@ float PID_Update(PID_t *pid, float setpoint, float measurement, float dt)
     if (!pid || dt <= 0.0f || isnan(dt))
         return 0.0f;
 
-    /* 1) 오차 */
-    float error       = setpoint - measurement;
+    /* 1) 오차 계산 */
+	float error = setpoint - measurement;
 
-    /* 2) ∫ e dt  (Anti-windup: 출력 범위 밖이면 적분 정지) */
-    float candidate_i = pid->integral + error * dt;
-    float p_term      = pid->kp * error;
-    float d_term      = pid->kd * (error - pid->prev_error) / dt;
-    float pre_output  = p_term + pid->ki * candidate_i + d_term;
+	/* 2) 적분 후보값 */
+	float cand_i = pid->integral + error * dt;
 
-    if (pre_output > pid->out_min && pre_output < pid->out_max)
-        pid->integral = candidate_i;   /* 적분 허용 */
+	/* 3) P, D 항 계산 */
+	float p = pid->kp * error;
+	float d = pid->kd * (error - pid->prev_error) / dt;
 
-    /* 3) 최종 출력 및 상태 갱신 */
-    float output = p_term + pid->ki * pid->integral + d_term;
+	/* 4) anti-windup 검토 */
+	float pre_out = p + pid->ki * cand_i + d;
+	if (pre_out > pid->out_min && pre_out < pid->out_max) {
+		pid->integral = cand_i;
+	}
 
-    if (output > pid->out_max) output = pid->out_max;
-    if (output < pid->out_min) output = pid->out_min;
+	/* 5) 출력 계산 및 클램프 */
+	float output = p + pid->ki * pid->integral + d;
+	if (output > pid->out_max) output = pid->out_max;
+	if (output < pid->out_min) output = pid->out_min;
 
-    pid->prev_error = error;
-    return output;
+	/* 6) 상태 갱신 */
+	pid->prev_error = error;
+	return output;
 }

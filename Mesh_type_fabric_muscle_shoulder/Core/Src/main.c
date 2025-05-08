@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include "ma100bf103a.h"
 #include "pidcontroller.h"
 /* USER CODE END Includes */
@@ -32,7 +33,7 @@
 /* USER CODE BEGIN PTD */
 #define CHANNELS 9
 #define THERMISTOR_SAMPLES 10
-#define PWM_TIMERS 3
+#define USART2_RX_BUFFER_SIZE  128
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -65,24 +66,24 @@ volatile bool isAdcFlag = false;
 static uint16_t adcBuf[CHANNELS * THERMISTOR_SAMPLES];
 volatile uint16_t adcMAF[CHANNELS];
 
-typedef struct{
-	uint16_t rawCh[CHANNELS];
-	float tempCh[CHANNELS];
-	float targetTemp[CHANNELS];
-}Temperature;
-Temperature temp;
+typedef struct {
+    TIM_HandleTypeDef *htim;
+    uint32_t           channel;
+    uint16_t           raw;     /* ADC 원시값 */
+    float              temp;    /* 변환된 온도(°C) */
+    float              set;     /* 목표 온도(°C) */
+    PID_t              pid;     /* PID 상태 */
+} Controller;
 
-PID_t pid;
-typedef struct{
-	float kp, ki, kd;
-	float dutymin, dutymax;
-	float duty[CHANNELS];
-	uint16_t tim1Period, tim3Period, tim4Period;
-	uint16_t pulse[CHANNELS];
-}controller;
-controller ctrl;
+static Controller ctrl[CHANNELS] = {
+		{ &htim3, TIM_CHANNEL_1 }, { &htim3, TIM_CHANNEL_2 }, { &htim3, TIM_CHANNEL_3 }, { &htim3, TIM_CHANNEL_4 },
+	    { &htim4, TIM_CHANNEL_1 },
+		{ &htim1, TIM_CHANNEL_1 }, { &htim1, TIM_CHANNEL_2 }, { &htim1, TIM_CHANNEL_3 }, { &htim1, TIM_CHANNEL_4 }
+	};
 
+static uint32_t lastCnt8;
 
+uint8_t usart2_rx_buffer[USART2_RX_BUFFER_SIZE];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -102,6 +103,7 @@ int _write(int file, char* p, int len){
     return len;
 }
 static float GetDeltaTime(void);
+void ControlInit(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -116,11 +118,7 @@ static float GetDeltaTime(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-  ctrl.kp = 0.0f;
-  ctrl.ki = 0.0f;
-  ctrl.kd = 0.0f;
-  ctrl.dutymin = 0.0f;
-  ctrl.dutymax = 100.0f;
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -153,10 +151,7 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim2);
   HAL_TIM_Base_Start(&htim8);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adcBuf, CHANNELS * THERMISTOR_SAMPLES);
-  PID_Init(ctrl.kp, ctrl.ki, ctrl.kd, ctrl.dutymin, ctrl.dutymax);
-  ctrl.tim1Period = __HAL_TIM_GET_AUTORELOAD(&htim1) + 1;
-  ctrl.tim3Period = __HAL_TIM_GET_AUTORELOAD(&htim3) + 1;
-  ctrl.tim4Period = __HAL_TIM_GET_AUTORELOAD(&htim4) + 1;
+  ControlInit();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -167,38 +162,19 @@ int main(void)
 		  isMainFlag = false;
 		  isAdcFlag = false;
 
-		  float dt = getDeltaTime();
+		  float dt = GetDeltaTime();
 
-		  for(int i = 0; i < CHANNELS; i++)
-		  {
-			  temp.rawCh[i] = adcMAF[i];
-			  temp.tempCh[i] = thermistor_celsius(temp.rawCh[i]);
+		  for(int ch = 0; ch < CHANNELS; ch++) {
+			  ctrl[ch].raw = adcMAF[ch];
+			  ctrl[ch].temp = thermistor_celsius(ctrl[ch].raw);
 
-			  ctrl.duty[i] = PID_Update(temp.targetTemp[i], temp.tempCh[i], dt);
-			  if(i < 4)
-			  {
-				  ctrl.pulse[i] = tim3Period*(duty[i]/ctrl.dutymax);
-			  }
-			  else if(i = 4)
-			  {
-				  ctrl.pulse[i] = tim4Period*(duty[i]/ctrl.dutymax);
-			  }
-			  else if(i > 4)
-			  {
-				  ctrl.pulse[i] = tim1Period*(duty[i]/ctrl.dutymax);
-			  }
+		  float duty = PID_Update(&ctrl[ch].pid, ctrl[ch].set,ctrl[ch].temp, dt);
+		  uint32_t period = __HAL_TIM_GET_AUTORELOAD(ctrl[ch].htim) + 1;
+		  uint32_t pulse  = (uint32_t)(duty * period * 0.01f);
+		  __HAL_TIM_SET_COMPARE(ctrl[ch].htim, ctrl[ch].channel, pulse);
 		  }
-		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse[0]);
-		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pulse[1]);
-		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, pulse[2]);
-		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, pulse[3]);
-		  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, pulse[4]);
-		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse[5]);
-		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pulse[6]);
-		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pulse[7]);
-		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, pulse[8]);
 
-		  printf("%.2f\r\n", temp.tempCh[0]);
+		  printf("%.2f\r\n", ctrl[0].temp);
 	  }
     /* USER CODE END WHILE */
 
@@ -819,10 +795,11 @@ void ProcessData(uint8_t* data, uint16_t len, UART_HandleTypeDef *huart)
             float input_p = 0.0f, input_i = 0.0f, input_d = 0.0f;
             if(sscanf(cmd, "%f,%f,%f", &input_p, &input_i, &input_d) == 3)
             {
-            	pid.kp = input_p;
-            	pid.ki = input_i;
-            	pid.kd = input_d;
-            	printf("PID Gains Updated: P: %.2f, I: %.2f, D: %.2f\r\n", pid.kp, pid.ki, pid.kd);
+            	for (int i = 0; i < CHANNELS; ++i) {
+            	  ctrl[i].pid.kp = input_p;
+            	  ctrl[i].pid.ki = input_i;
+            	  ctrl[i].pid.kd = input_d;
+            	}
             }
         }
     }
@@ -840,6 +817,19 @@ static float GetDeltaTime(void)
     }
     lastCnt8 = now;
     return diff * 0.0000001f;  /* 0.1µs × diff = sec */
+}
+
+void ControlInit(void)
+{
+    lastCnt8 = __HAL_TIM_GET_COUNTER(&htim8);
+
+    for (int ch = 0; ch < CHANNELS; ch++) {
+        ctrl[ch].set = 30.0f;
+        PID_Init(&ctrl[ch].pid,
+                 6.0f, 2.5f, 0.1f,   /* P, I, D 게인 */
+                 0.0f, 100.0f);      /* 출력 클램프 0~100% */
+        HAL_TIM_PWM_Start(ctrl[ch].htim, ctrl[ch].channel);
+    }
 }
 /* USER CODE END 4 */
 
